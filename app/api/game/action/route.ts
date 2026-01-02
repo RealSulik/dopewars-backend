@@ -265,10 +265,14 @@ export async function POST(request: NextRequest) {
         };
 
         eventDescription = `Traveled to new location. Day ${newDay}/30. Debt: $${newDebt.toLocaleString()}, Bank: $${newBank.toLocaleString()}`;
+        // PRICE FIX: Generate prices for new location immediately
+        await getCurrentPrices(gameRun.id, newDay, location);
+        // Small delay to ensure DB write completes before state refresh
+        await new Promise(resolve => setTimeout(resolve, 100));
         
         // Check for cop encounter after travel
         if (checkForCopEncounter(newDay)) {
-          eventDescription += ' ⚠️ Officer Hardass spotted you!';
+          eventDescription += ' âš ï¸ Officer Hardass spotted you!';
         }
         
         break;
@@ -301,6 +305,10 @@ export async function POST(request: NextRequest) {
         };
 
         eventDescription = `Day ${newDay}/30. ${event.description} Debt: $${newDebt.toLocaleString()}, Bank: $${newBank.toLocaleString()}`;
+        // PRICE FIX: Generate prices for new day immediately
+        await getCurrentPrices(gameRun.id, newDay, gameRun.location);
+        // Small delay to ensure DB write completes
+        await new Promise(resolve => setTimeout(resolve, 100));
 
         // Record event
         await supabase.from('game_events').insert({
@@ -534,7 +542,7 @@ export async function POST(request: NextRequest) {
           eventDescription = `Fought Officer Hardass but got hurt! -${COP_DAMAGE} health`;
 
           if (newHealth <= 0) {
-            eventDescription += ' 💀 You died!';
+            eventDescription += ' ðŸ’€ You died!';
             updateData.status = 'lost';
           }
 
@@ -574,7 +582,7 @@ export async function POST(request: NextRequest) {
           eventDescription = `Tried to run but got shot! -${damage} health`;
 
           if (newHealth <= 0) {
-            eventDescription += ' 💀 You died!';
+            eventDescription += ' ðŸ’€ You died!';
             updateData.status = 'lost';
           }
 
