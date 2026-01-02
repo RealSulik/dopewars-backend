@@ -91,6 +91,13 @@ export async function GET(request: NextRequest) {
       // NEW: Upgrades
       coatUpgrades: gameRun.coat_upgrades,
       
+      // NEW: Event flags for frontend modals
+      copEncounterPending: gameRun.cop_encounter_pending || false,
+      coatOfferPending: gameRun.coat_offer_pending || false,
+      
+      // NEW: Win condition tracking
+      wonAtDay: gameRun.won_at_day || null,
+      
       // Prices
       prices,
       

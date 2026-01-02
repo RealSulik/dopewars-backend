@@ -7,8 +7,8 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// Contract details - WILL UPDATE WITH NEW CONTRACT ADDRESS
-const CONTRACT_ADDRESS = '0x58b200A5ac031DD6245ffc63E0A247AEe39ec609'; // UPDATE THIS AFTER DEPLOYMENT
+// Contract details
+const CONTRACT_ADDRESS = '0x58b200A5ac031DD6245ffc63E0A247AEe39ec609';
 const CONTRACT_ABI = [
   {
     "inputs": [
@@ -21,6 +21,20 @@ const CONTRACT_ABI = [
     "name": "settleRun",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {"internalType": "address", "name": "player", "type": "address"}
+    ],
+    "name": "getPlayerStats",
+    "outputs": [
+      {"internalType": "uint256", "name": "ice", "type": "uint256"},
+      {"internalType": "uint256", "name": "bestScore", "type": "uint256"},
+      {"internalType": "uint256", "name": "runs", "type": "uint256"},
+      {"internalType": "uint256", "name": "wins", "type": "uint256"}
+    ],
+    "stateMutability": "view",
     "type": "function"
   }
 ];
@@ -120,11 +134,11 @@ export async function POST(request: NextRequest) {
 
     console.log('🔑 Server wallet:', serverWallet.address);
 
-    // ===== CRITICAL FIX: Sign with PLAYER ADDRESS (not server wallet!) =====
+    // Sign with PLAYER ADDRESS
     const messageHash = ethers.keccak256(
       ethers.solidityPacked(
         ['address', 'uint256', 'uint256', 'bytes32'],
-        [playerAddress, finalNetWorth, gameRun.days_played, runId] // PLAYER ADDRESS!
+        [playerAddress, finalNetWorth, gameRun.days_played, runId]
       )
     );
 
@@ -139,11 +153,11 @@ export async function POST(request: NextRequest) {
 
     console.log('✍️ Signature created:', signature);
 
-    // Call smart contract with PLAYER ADDRESS as first parameter
+    // Call smart contract
     const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, serverWallet);
 
     console.log('📞 Calling settleRun with:', {
-      playerAddress,  // REAL PLAYER ADDRESS!
+      playerAddress,
       finalNetWorth,
       daysPlayed: gameRun.days_played,
       runId,
@@ -151,7 +165,7 @@ export async function POST(request: NextRequest) {
     });
 
     const tx = await contract.settleRun(
-      playerAddress,  // ✅ REAL PLAYER ADDRESS (NOT SERVER WALLET!)
+      playerAddress,
       finalNetWorth,
       gameRun.days_played,
       runId,
@@ -163,52 +177,62 @@ export async function POST(request: NextRequest) {
     const receipt = await tx.wait();
     console.log('✅ Transaction confirmed:', receipt.hash);
 
-    // Get player's database ICE
-    const { data: playerData } = await supabase
-      .from('players')
-      .select('total_ice')
-      .eq('wallet_address', playerAddress)
-      .single();
+    // ===== READ ICE FROM BLOCKCHAIN (NOT DATABASE!) =====
+    console.log('🔍 Reading player stats from blockchain...');
+    const playerStats = await contract.getPlayerStats(playerAddress);
+    const blockchainIce = Number(playerStats[0]); // ice
+    const blockchainBestScore = Number(playerStats[1]); // bestScore
+    const blockchainRuns = Number(playerStats[2]); // runs
+    const blockchainWins = Number(playerStats[3]); // wins
 
-    const databaseIce = playerData?.total_ice || 0;
+    console.log('📊 Blockchain stats:', {
+      ice: blockchainIce,
+      bestScore: blockchainBestScore,
+      runs: blockchainRuns,
+      wins: blockchainWins
+    });
 
     // Mark game as settled in database
+    const didWin = gameRun.won_at_day !== null; // Check if they ever hit $1M
+    
     await supabase
       .from('game_runs')
       .update({
         settled: true,
-        status: finalNetWorth >= 1_000_000 ? 'won' : 'lost',
+        status: didWin ? 'won' : 'lost',
         final_net_worth: finalNetWorth,
         blockchain_tx: receipt.hash,
-        ice_awarded: calculateIceReward(finalNetWorth, gameRun.days_played)
+        ice_awarded: didWin ? 10 : calculateIceReward(finalNetWorth, gameRun.days_played)
       })
       .eq('id', gameRun.id);
 
-    // Update leaderboard
+    // ===== UPDATE LEADERBOARD WITH BLOCKCHAIN ICE =====
     await supabase
       .from('leaderboard')
       .upsert({
         wallet_address: playerAddress,
-        best_net_worth: finalNetWorth,
-        total_runs: 1,
-        total_wins: finalNetWorth >= 1_000_000 ? 1 : 0,
-        total_ice: databaseIce
+        best_net_worth: blockchainBestScore, // Use blockchain's best score
+        total_runs: blockchainRuns, // Use blockchain runs
+        total_wins: blockchainWins, // Use blockchain wins
+        total_ice: blockchainIce // ✅ USE BLOCKCHAIN ICE!
       }, {
         onConflict: 'wallet_address',
         ignoreDuplicates: false
       });
 
-    console.log('✅ Settlement complete!');
+    console.log('✅ Settlement complete! Leaderboard updated with blockchain ICE:', blockchainIce);
 
     return NextResponse.json({
       success: true,
       txHash: receipt.hash,
       finalNetWorth,
       daysPlayed: gameRun.days_played,
-      iceAwarded: calculateIceReward(finalNetWorth, gameRun.days_played),
-      didWin: finalNetWorth >= 1_000_000,
-      message: finalNetWorth >= 1_000_000 
-        ? '🎉 YOU WON! Net worth over $1M!' 
+      wonAtDay: gameRun.won_at_day,
+      iceAwarded: didWin ? 10 : calculateIceReward(finalNetWorth, gameRun.days_played),
+      totalIce: blockchainIce, // Return total ICE from blockchain
+      didWin,
+      message: didWin
+        ? `🎉 YOU WON at Day ${gameRun.won_at_day}! Earned 10 ICE!` 
         : 'Game settled. Try again for the $1M goal!'
     });
 
