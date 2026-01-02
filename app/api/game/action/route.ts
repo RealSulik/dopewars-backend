@@ -105,20 +105,26 @@ async function getCurrentPrices(runId: string, day: number, location: number) {
 
 export async function POST(request: NextRequest) {
   try {
-    const { runId, action, params } = await request.json();
+    const body = await request.json();
+    const { playerAddress, action, drugIndex, amount, location } = body;
 
-    if (!runId || !action) {
+    console.log('🔥 Action request:', body);
+
+    if (!playerAddress || !action) {
       return NextResponse.json(
-        { error: 'Run ID and action required' },
+        { error: 'Player address and action required' },
         { status: 400 }
       );
     }
 
-    // Get current game state
+    // Get the active run for this player
     const { data: gameRun, error: fetchError } = await supabase
       .from('game_runs')
       .select('*')
-      .eq('id', runId)
+      .eq('wallet_address', playerAddress)
+      .eq('status', 'active')
+      .order('created_at', { ascending: false })
+      .limit(1)
       .single();
 
     if (fetchError || !gameRun) {
@@ -135,13 +141,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const runId = gameRun.id;
     let updatedRun = { ...gameRun };
     const prices = await getCurrentPrices(runId, gameRun.days_played, gameRun.location);
 
     // Execute action
     switch (action) {
-      case 'buy': {
-        const { drugIndex, amount } = params;
+      case 'buyDrug': {
         const drugColumns = ['weed', 'acid', 'cocaine', 'heroin'];
         const priceKeys = ['weed', 'acid', 'cocaine', 'heroin'];
         
@@ -157,11 +163,11 @@ export async function POST(request: NextRequest) {
         updatedRun.cash -= cost;
         updatedRun[drugColumns[drugIndex] as keyof typeof updatedRun] = 
           (updatedRun[drugColumns[drugIndex] as keyof typeof updatedRun] as number) + amount;
+        updatedRun.last_event = `Bought ${amount} ${DRUG_NAMES[drugIndex]}`;
         break;
       }
 
-      case 'sell': {
-        const { drugIndex, amount } = params;
+      case 'sellDrug': {
         const drugColumns = ['weed', 'acid', 'cocaine', 'heroin'];
         const priceKeys = ['weed', 'acid', 'cocaine', 'heroin'];
         
@@ -177,12 +183,11 @@ export async function POST(request: NextRequest) {
         const revenue = prices[priceKeys[drugIndex] as keyof typeof prices] * amount;
         updatedRun.cash += revenue;
         updatedRun[drugColumns[drugIndex] as keyof typeof updatedRun] = currentAmount - amount;
+        updatedRun.last_event = `Sold ${amount} ${DRUG_NAMES[drugIndex]}`;
         break;
       }
 
-      case 'travel': {
-        const { location } = params;
-        
+      case 'travelTo': {
         if (updatedRun.cash < 100) {
           return NextResponse.json(
             { error: 'Not enough cash for travel (need $100)' },
@@ -192,6 +197,7 @@ export async function POST(request: NextRequest) {
 
         updatedRun.cash -= 100;
         updatedRun.location = location;
+        updatedRun.last_event = 'Traveled to new location';
         break;
       }
 
@@ -201,7 +207,7 @@ export async function POST(request: NextRequest) {
         // Generate random event
         const event = generateRandomEvent(updatedRun.days_played);
         updatedRun.cash = Math.max(0, updatedRun.cash + event.cashChange);
-        updatedRun.last_event_description = event.description;
+        updatedRun.last_event = event.description;
 
         // Log event
         await supabase.from('game_events').insert({
@@ -219,12 +225,16 @@ export async function POST(request: NextRequest) {
           (updatedRun.cocaine * prices.cocaine) +
           (updatedRun.heroin * prices.heroin);
 
-        if (netWorth >= 100000) {
-          updatedRun.status = 'won';
+        if (netWorth >= 1000000) {
+          updatedRun.status = 'finished';
+          updatedRun.did_win = true;
           updatedRun.final_net_worth = netWorth;
+          updatedRun.last_event = 'You won! Reached $1,000,000!';
         } else if (updatedRun.days_played >= 30) {
-          updatedRun.status = 'lost';
+          updatedRun.status = 'finished';
+          updatedRun.did_win = false;
           updatedRun.final_net_worth = netWorth;
+          updatedRun.last_event = 'Game over. You ran out of time.';
         }
         break;
       }
@@ -237,22 +247,22 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        if (updatedRun.hustles_used >= 2) {
+        if ((updatedRun.hustles_used || 0) >= 2) {
           return NextResponse.json(
             { error: 'No hustles left' },
             { status: 400 }
           );
         }
 
-        updatedRun.hustles_used += 1;
+        updatedRun.hustles_used = (updatedRun.hustles_used || 0) + 1;
         const success = Math.random() > 0.5;
         
         if (success) {
           const gain = 100 + Math.floor(Math.random() * 200);
           updatedRun.cash += gain;
-          updatedRun.last_event_description = 'Street hustle paid off.';
+          updatedRun.last_event = `Street hustle paid off! Gained $${gain}`;
         } else {
-          updatedRun.last_event_description = 'You tried hustling, but gained nothing.';
+          updatedRun.last_event = 'You tried hustling, but gained nothing.';
         }
         break;
       }
@@ -265,17 +275,78 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        if (updatedRun.stashes_used >= 1) {
+        if ((updatedRun.stashes_used || 0) >= 1) {
           return NextResponse.json(
             { error: 'No stash left' },
             { status: 400 }
           );
         }
 
-        updatedRun.stashes_used += 1;
+        updatedRun.stashes_used = (updatedRun.stashes_used || 0) + 1;
         const gain = 400 + Math.floor(Math.random() * 600);
         updatedRun.cash += gain;
-        updatedRun.last_event_description = 'You found a stash!';
+        updatedRun.last_event = `You found a stash! Gained $${gain}`;
+        break;
+      }
+
+      case 'claimDailyIce': {
+        // Get player data to check last claim time
+        const { data: playerData, error: playerError } = await supabase
+          .from('players')
+          .select('last_ice_claim_at, total_ice')
+          .eq('wallet_address', playerAddress)
+          .single();
+
+        if (playerError) {
+          console.error('Error fetching player data:', playerError);
+          return NextResponse.json(
+            { error: 'Failed to fetch player data' },
+            { status: 500 }
+          );
+        }
+
+        // Check if 24 hours have passed since last claim
+        const now = new Date();
+        const lastClaim = playerData?.last_ice_claim_at ? new Date(playerData.last_ice_claim_at) : null;
+        
+        if (lastClaim) {
+          const hoursSinceLastClaim = (now.getTime() - lastClaim.getTime()) / (1000 * 60 * 60);
+          
+          if (hoursSinceLastClaim < 24) {
+            const hoursRemaining = Math.ceil(24 - hoursSinceLastClaim);
+            return NextResponse.json(
+              { 
+                error: `Daily ICE already claimed. Next claim in ${hoursRemaining} hours.`,
+                hoursRemaining 
+              },
+              { status: 400 }
+            );
+          }
+        }
+
+        // Award daily ICE (1-3 ICE per day)
+        const dailyIceReward = 1 + Math.floor(Math.random() * 3); // Random 1-3 ICE
+        const newTotalIce = (playerData?.total_ice || 0) + dailyIceReward;
+
+        // Update player's ICE balance and last claim time
+        const { error: updateError } = await supabase
+          .from('players')
+          .update({
+            total_ice: newTotalIce,
+            last_ice_claim_at: now.toISOString()
+          })
+          .eq('wallet_address', playerAddress);
+
+        if (updateError) {
+          console.error('Error updating ICE claim:', updateError);
+          return NextResponse.json(
+            { error: 'Failed to claim ICE' },
+            { status: 500 }
+          );
+        }
+
+        updatedRun.last_event = `Claimed ${dailyIceReward} daily ICE! Total: ${newTotalIce}`;
+        console.log(`✅ Player ${playerAddress} claimed ${dailyIceReward} ICE. New total: ${newTotalIce}`);
         break;
       }
 

@@ -7,128 +7,201 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+// Contract details
+const CONTRACT_ADDRESS = '0xb4b5E8654EFd675Cde9EFAf4E6131D33ABEa3aF5';
+const CONTRACT_ABI = [
+  {
+    "inputs": [
+      {"internalType": "uint256", "name": "finalNetWorth", "type": "uint256"},
+      {"internalType": "uint256", "name": "daysPlayed", "type": "uint256"},
+      {"internalType": "bytes32", "name": "runId", "type": "bytes32"},
+      {"internalType": "bytes", "name": "signature", "type": "bytes"}
+    ],
+    "name": "settleRun",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+];
+
 export async function POST(request: NextRequest) {
   try {
-    const { runId } = await request.json();
+    const { playerAddress } = await request.json();
 
-    if (!runId) {
+    console.log('📥 Settlement request for:', playerAddress);
+
+    if (!playerAddress) {
       return NextResponse.json(
-        { error: 'Run ID required' },
+        { success: false, error: 'Player address required' },
         { status: 400 }
       );
     }
 
-    // Get game run
-    const { data: gameRun, error: fetchError } = await supabase
+    // Get the active run for this player
+    const { data: gameRun, error: runError } = await supabase
       .from('game_runs')
       .select('*')
-      .eq('id', runId)
+      .eq('wallet_address', playerAddress)
+      .eq('status', 'active')
+      .order('created_at', { ascending: false })
+      .limit(1)
       .single();
 
-    if (fetchError || !gameRun) {
+    if (runError || !gameRun) {
       return NextResponse.json(
-        { error: 'Game run not found' },
+        { success: false, error: 'No active game found to settle' },
         { status: 404 }
-      );
-    }
-
-    // Check if game is finished
-    if (gameRun.status === 'active') {
-      return NextResponse.json(
-        { error: 'Game is still active. Complete the run first.' },
-        { status: 400 }
       );
     }
 
     // Check if already settled
     if (gameRun.settled) {
       return NextResponse.json(
-        { error: 'Run already settled on blockchain' },
+        { success: false, error: 'Game already settled' },
         { status: 400 }
       );
     }
 
     // Calculate final net worth
-    const { data: prices } = await supabase
+    const { data: priceData } = await supabase
       .from('daily_prices')
       .select('*')
-      .eq('run_id', runId)
+      .eq('run_id', gameRun.id)
       .eq('day', gameRun.days_played)
       .eq('location', gameRun.location)
       .single();
 
-    let netWorth = gameRun.cash;
-    
-    if (prices) {
-      netWorth += gameRun.weed * prices.weed_price;
-      netWorth += gameRun.acid * prices.acid_price;
-      netWorth += gameRun.cocaine * prices.cocaine_price;
-      netWorth += gameRun.heroin * prices.heroin_price;
-    }
+    const prices = priceData ? {
+      weed: priceData.weed_price,
+      acid: priceData.acid_price,
+      cocaine: priceData.cocaine_price,
+      heroin: priceData.heroin_price
+    } : { weed: 0, acid: 0, cocaine: 0, heroin: 0 };
 
-    // Create signature
-    const serverWallet = new ethers.Wallet(process.env.SERVER_WALLET_PRIVATE_KEY!);
-    
-    // Create runId as bytes32 (keccak256 hash of UUID)
-    const runIdBytes32 = ethers.keccak256(ethers.toUtf8Bytes(runId));
-    
-    // Create message hash matching contract's getMessageHash function
-    const messageHash = ethers.solidityPackedKeccak256(
-      ['address', 'uint256', 'uint256', 'bytes32'],
-      [gameRun.wallet_address, netWorth, gameRun.days_played, runIdBytes32]
+    const finalNetWorth = gameRun.cash +
+      (gameRun.weed * prices.weed) +
+      (gameRun.acid * prices.acid) +
+      (gameRun.cocaine * prices.cocaine) +
+      (gameRun.heroin * prices.heroin);
+
+    console.log('💰 Final net worth:', finalNetWorth);
+    console.log('📅 Days played:', gameRun.days_played);
+
+    // Generate runId (unique identifier for this game)
+    const runId = ethers.keccak256(
+      ethers.toUtf8Bytes(`${gameRun.id}-${gameRun.created_at}`)
     );
 
-    // Sign the message (ethers v6 automatically adds Ethereum prefix)
-    const signature = await serverWallet.signMessage(ethers.getBytes(messageHash));
+    console.log('🆔 Run ID:', runId);
+
+    // Get server wallet
+    const serverPrivateKey = process.env.SERVER_PRIVATE_KEY;
+    if (!serverPrivateKey) {
+      throw new Error('Server private key not configured');
+    }
+    const serverWallet = new ethers.Wallet(serverPrivateKey);
+    const msgSender = serverWallet.address;
+    
+    console.log('🔑 msg.sender will be:', msgSender);
+    
+    // CRITICAL: Contract uses msg.sender (server address) in getMessageHash, NOT player address!
+    const packed = ethers.solidityPacked(
+      ['address', 'uint256', 'uint256', 'bytes32'],
+      [msgSender, finalNetWorth, gameRun.days_played, runId]
+    );
+    const messageHash = ethers.keccak256(packed);
+
+    console.log('📝 Packed data:', packed);
+    console.log('📝 Message hash:', messageHash);
+    
+    // Create Ethereum signed message hash (contract does this in getEthSignedMessageHash)
+    const ethSignedMessageHash = ethers.keccak256(
+      ethers.concat([
+        ethers.toUtf8Bytes('\x19Ethereum Signed Message:\n32'),
+        ethers.getBytes(messageHash)
+      ])
+    );
+    
+    console.log('📝 Eth signed message hash:', ethSignedMessageHash);
+    
+    // Sign directly
+    const signingKey = new ethers.SigningKey(serverPrivateKey);
+    const sig = signingKey.sign(ethSignedMessageHash);
+    const signature = ethers.Signature.from(sig).serialized;
+
+    console.log('✍️ Server signature:', signature);
+
+    // Submit to blockchain
+    const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://mainnet.base.org');
+    const wallet = new ethers.Wallet(serverPrivateKey, provider);
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
+
+    console.log('📤 Submitting to blockchain...');
+
+    const tx = await contract.settleRun(
+      finalNetWorth,
+      gameRun.days_played,
+      runId,
+      signature
+    );
+
+    console.log('⏳ Transaction sent:', tx.hash);
+
+    const receipt = await tx.wait();
+
+    console.log('✅ Transaction confirmed:', receipt.hash);
+
+    // Update game run as settled
+    await supabase
+      .from('game_runs')
+      .update({
+        status: 'finished',
+        settled: true,
+        blockchain_tx: receipt.hash,
+        final_net_worth: finalNetWorth,
+        did_win: finalNetWorth >= 1000000
+      })
+      .eq('id', gameRun.id);
 
     // Update leaderboard
-    const { data: existingLeader } = await supabase
+    const { data: existingLeaderboard } = await supabase
       .from('leaderboard')
       .select('*')
-      .eq('wallet_address', gameRun.wallet_address)
+      .eq('wallet_address', playerAddress)
       .single();
 
-    const didWin = gameRun.status === 'won';
-    const iceAwarded = didWin ? 10 : gameRun.days_played >= 30 ? 3 : netWorth >= 50000 ? 5 : netWorth >= 25000 ? 2 : 1;
-
-    if (existingLeader) {
+    if (existingLeaderboard) {
       await supabase
         .from('leaderboard')
         .update({
-          best_net_worth: Math.max(existingLeader.best_net_worth, netWorth),
-          total_ice: existingLeader.total_ice + iceAwarded,
-          total_runs: existingLeader.total_runs + 1,
-          total_wins: existingLeader.total_wins + (didWin ? 1 : 0)
+          best_net_worth: Math.max(existingLeaderboard.best_net_worth, finalNetWorth),
+          total_runs: existingLeaderboard.total_runs + 1,
+          total_wins: existingLeaderboard.total_wins + (finalNetWorth >= 1000000 ? 1 : 0)
         })
-        .eq('wallet_address', gameRun.wallet_address);
+        .eq('wallet_address', playerAddress);
     } else {
       await supabase
         .from('leaderboard')
         .insert({
-          wallet_address: gameRun.wallet_address,
-          best_net_worth: netWorth,
-          total_ice: iceAwarded,
+          wallet_address: playerAddress,
+          best_net_worth: finalNetWorth,
           total_runs: 1,
-          total_wins: didWin ? 1 : 0
+          total_wins: finalNetWorth >= 1000000 ? 1 : 0
         });
     }
 
     return NextResponse.json({
       success: true,
-      settlement: {
-        finalNetWorth: netWorth,
-        daysPlayed: gameRun.days_played,
-        runId: runIdBytes32,
-        signature,
-        iceAwarded,
-        didWin
-      }
+      txHash: receipt.hash,
+      finalNetWorth,
+      daysPlayed: gameRun.days_played,
+      didWin: finalNetWorth >= 1000000
     });
 
   } catch (error: any) {
-    console.error('Settlement error:', error);
+    console.error('❌ Settlement error:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to generate settlement' },
+      { success: false, error: error.message || 'Settlement failed' },
       { status: 500 }
     );
   }

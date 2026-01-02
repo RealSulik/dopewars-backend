@@ -48,44 +48,48 @@ function generatePrice(drugIndex: number, location: number): number {
 
 export async function POST(request: NextRequest) {
   try {
-    const { walletAddress } = await request.json();
+    const body = await request.json();
+    const playerAddress = body.playerAddress || body.walletAddress; // Accept both names
     
-    if (!walletAddress) {
+    console.log('📥 Received request body:', body);
+    console.log('📥 Player address:', playerAddress);
+    
+    if (!playerAddress) {
       return NextResponse.json(
         { error: 'Wallet address required' },
         { status: 400 }
       );
     }
-
+    
     // Check if player exists, if not create
     const { data: existingPlayer } = await supabase
       .from('players')
       .select('id')
-      .eq('wallet_address', walletAddress)
+      .eq('wallet_address', playerAddress)
       .single();
-
+    
     let playerId: string;
-
+    
     if (!existingPlayer) {
       // Create new player
       const { data: newPlayer, error: playerError } = await supabase
         .from('players')
-        .insert({ wallet_address: walletAddress })
+        .insert({ wallet_address: playerAddress })
         .select('id')
         .single();
-
+      
       if (playerError) throw playerError;
       playerId = newPlayer.id;
     } else {
       playerId = existingPlayer.id;
     }
-
+    
     // Create new game run
     const { data: gameRun, error: runError } = await supabase
       .from('game_runs')
       .insert({
         player_id: playerId,
-        wallet_address: walletAddress,
+        wallet_address: playerAddress,
         cash: 2000,
         location: 0, // Start at Staten Island
         days_played: 0,
@@ -97,14 +101,14 @@ export async function POST(request: NextRequest) {
       })
       .select()
       .single();
-
+    
     if (runError) throw runError;
-
+    
     // Generate initial prices for day 0, location 0
-    const prices = [0, 1, 2, 3].map(drugIndex => 
+    const prices = [0, 1, 2, 3].map(drugIndex =>
       generatePrice(drugIndex, 0)
     );
-
+    
     // Store prices in database
     const { error: pricesError } = await supabase
       .from('daily_prices')
@@ -117,12 +121,18 @@ export async function POST(request: NextRequest) {
         cocaine_price: prices[2],
         heroin_price: prices[3]
       });
-
+    
     if (pricesError) throw pricesError;
-
-    // Return game state with prices
+    
+    // Generate nonce for session
+    const nonce = Math.random().toString(36).substring(7);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    
+    // Return session data
     return NextResponse.json({
       success: true,
+      nonce,
+      expiresAt,
       gameRun: {
         ...gameRun,
         prices: {
@@ -133,7 +143,6 @@ export async function POST(request: NextRequest) {
         }
       }
     });
-
   } catch (error: any) {
     console.error('Start game error:', error);
     return NextResponse.json(
