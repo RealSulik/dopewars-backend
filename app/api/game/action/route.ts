@@ -24,6 +24,14 @@ const CITY_MULTIPLIERS = [
   [1.4, 1.2, 1.7, 1.3]
 ];
 
+// Constants
+const DEBT_INTEREST_RATE = 10; // 10% per day
+const BANK_INTEREST_RATE = 2; // 2% per day
+const COAT_UPGRADE_COST = 5000;
+const GUN_COST = 3000;
+const COP_REWARD = 2000;
+const COP_DAMAGE = 25;
+
 function generatePrice(drugIndex: number, location: number): number {
   const range = PRICE_RANGES[drugIndex as keyof typeof PRICE_RANGES];
   const mid = (range.min + range.max) / 2;
@@ -35,7 +43,7 @@ function generatePrice(drugIndex: number, location: number): number {
   return Math.round(price);
 }
 
-function generateRandomEvent(day: number): { description: string; cashChange: number } {
+function generateRandomEvent(day: number, hasGun: boolean): { description: string; cashChange: number } {
   const roll = Math.random();
   
   if (day < 10) {
@@ -64,6 +72,14 @@ function generateRandomEvent(day: number): { description: string; cashChange: nu
   return { description: 'Normal day. No notable events.', cashChange: 0 };
 }
 
+function checkForCopEncounter(day: number): boolean {
+  // 15% chance of cop encounter, increasing with days
+  const baseChance = 0.15;
+  const dayMultiplier = Math.min(day / 30, 1); // Max 100% increase
+  const chance = baseChance * (1 + dayMultiplier);
+  return Math.random() < chance;
+}
+
 async function getCurrentPrices(runId: string, day: number, location: number) {
   const { data } = await supabase
     .from('daily_prices')
@@ -82,7 +98,6 @@ async function getCurrentPrices(runId: string, day: number, location: number) {
     };
   }
 
-  // Generate new prices if they don't exist
   const prices = {
     weed: generatePrice(0, location),
     acid: generatePrice(1, location),
@@ -106,19 +121,17 @@ async function getCurrentPrices(runId: string, day: number, location: number) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { playerAddress, action, drugIndex, amount, location } = body;
+    const { playerAddress, action } = body;
 
-    console.log('🔥 Action request:', body);
-
-    if (!playerAddress || !action) {
+    if (!playerAddress) {
       return NextResponse.json(
-        { error: 'Player address and action required' },
+        { success: false, error: 'Player address required' },
         { status: 400 }
       );
     }
 
-    // Get the active run for this player
-    const { data: gameRun, error: fetchError } = await supabase
+    // Get active run
+    const { data: gameRun, error: runError } = await supabase
       .from('game_runs')
       .select('*')
       .eq('wallet_address', playerAddress)
@@ -127,209 +140,491 @@ export async function POST(request: NextRequest) {
       .limit(1)
       .single();
 
-    if (fetchError || !gameRun) {
+    if (runError || !gameRun) {
       return NextResponse.json(
-        { error: 'Game run not found' },
+        { success: false, error: 'No active game found' },
         { status: 404 }
       );
     }
 
-    if (gameRun.status !== 'active') {
-      return NextResponse.json(
-        { error: 'Game is not active' },
-        { status: 400 }
-      );
-    }
+    let updateData: any = {};
+    let eventDescription = gameRun.last_event_description || 'Game started.';
 
-    const runId = gameRun.id;
-    let updatedRun = { ...gameRun };
-    const prices = await getCurrentPrices(runId, gameRun.days_played, gameRun.location);
+    // ===== HANDLE ACTIONS =====
 
-    // Execute action
     switch (action) {
+      // ===== BUY DRUG =====
       case 'buyDrug': {
-        const drugColumns = ['weed', 'acid', 'cocaine', 'heroin'];
-        const priceKeys = ['weed', 'acid', 'cocaine', 'heroin'];
+        const { drugIndex, amount } = body;
         
-        const cost = prices[priceKeys[drugIndex] as keyof typeof prices] * amount;
-        
-        if (updatedRun.cash < cost) {
+        if (drugIndex < 0 || drugIndex > 3 || !amount || amount <= 0) {
           return NextResponse.json(
-            { error: 'Not enough cash' },
+            { success: false, error: 'Invalid drug or amount' },
             { status: 400 }
           );
         }
 
-        updatedRun.cash -= cost;
-        updatedRun[drugColumns[drugIndex] as keyof typeof updatedRun] = 
-          (updatedRun[drugColumns[drugIndex] as keyof typeof updatedRun] as number) + amount;
-        updatedRun.last_event = `Bought ${amount} ${DRUG_NAMES[drugIndex]}`;
+        const prices = await getCurrentPrices(gameRun.id, gameRun.days_played, gameRun.location);
+        const priceArray = [prices.weed, prices.acid, prices.cocaine, prices.heroin];
+        const totalCost = priceArray[drugIndex] * amount;
+
+        // Check capacity
+        const currentInventory = gameRun.weed + gameRun.acid + gameRun.cocaine + gameRun.heroin;
+        if (currentInventory + amount > gameRun.trenchcoat_capacity) {
+          return NextResponse.json(
+            { success: false, error: `Not enough space! Capacity: ${gameRun.trenchcoat_capacity}` },
+            { status: 400 }
+          );
+        }
+
+        if (gameRun.cash < totalCost) {
+          return NextResponse.json(
+            { success: false, error: 'Not enough cash' },
+            { status: 400 }
+          );
+        }
+
+        const drugColumn = ['weed', 'acid', 'cocaine', 'heroin'][drugIndex];
+        updateData = {
+          cash: gameRun.cash - totalCost,
+          [drugColumn]: gameRun[drugColumn] + amount
+        };
+        eventDescription = `Bought ${amount} ${DRUG_NAMES[drugIndex]} for $${totalCost.toLocaleString()}.`;
         break;
       }
 
+      // ===== SELL DRUG =====
       case 'sellDrug': {
-        const drugColumns = ['weed', 'acid', 'cocaine', 'heroin'];
-        const priceKeys = ['weed', 'acid', 'cocaine', 'heroin'];
+        const { drugIndex, amount } = body;
         
-        const currentAmount = updatedRun[drugColumns[drugIndex] as keyof typeof updatedRun] as number;
-        
-        if (currentAmount < amount) {
+        if (drugIndex < 0 || drugIndex > 3 || !amount || amount <= 0) {
           return NextResponse.json(
-            { error: 'Not enough inventory' },
+            { success: false, error: 'Invalid drug or amount' },
             { status: 400 }
           );
         }
 
-        const revenue = prices[priceKeys[drugIndex] as keyof typeof prices] * amount;
-        updatedRun.cash += revenue;
-        updatedRun[drugColumns[drugIndex] as keyof typeof updatedRun] = currentAmount - amount;
-        updatedRun.last_event = `Sold ${amount} ${DRUG_NAMES[drugIndex]}`;
+        const drugColumn = ['weed', 'acid', 'cocaine', 'heroin'][drugIndex];
+        if (gameRun[drugColumn] < amount) {
+          return NextResponse.json(
+            { success: false, error: `Not enough ${DRUG_NAMES[drugIndex]}` },
+            { status: 400 }
+          );
+        }
+
+        const prices = await getCurrentPrices(gameRun.id, gameRun.days_played, gameRun.location);
+        const priceArray = [prices.weed, prices.acid, prices.cocaine, prices.heroin];
+        const totalEarned = priceArray[drugIndex] * amount;
+
+        updateData = {
+          cash: gameRun.cash + totalEarned,
+          [drugColumn]: gameRun[drugColumn] - amount
+        };
+        eventDescription = `Sold ${amount} ${DRUG_NAMES[drugIndex]} for $${totalEarned.toLocaleString()}.`;
         break;
       }
 
+      // ===== TRAVEL (NOW ENDS DAY!) =====
       case 'travelTo': {
-        if (updatedRun.cash < 100) {
+        const { location } = body;
+        
+        if (location < 0 || location > 6) {
           return NextResponse.json(
-            { error: 'Not enough cash for travel (need $100)' },
+            { success: false, error: 'Invalid location' },
             { status: 400 }
           );
         }
 
-        updatedRun.cash -= 100;
-        updatedRun.location = location;
-        updatedRun.last_event = 'Traveled to new location';
+        if (location === gameRun.location) {
+          return NextResponse.json(
+            { success: false, error: 'Already at this location' },
+            { status: 400 }
+          );
+        }
+
+        // Check if dead
+        if (gameRun.health <= 0) {
+          return NextResponse.json(
+            { success: false, error: 'Cannot travel - you are dead!' },
+            { status: 400 }
+          );
+        }
+
+        // Travel ends the day!
+        const newDay = gameRun.days_played + 1;
+        
+        // Calculate interest
+        const newDebt = Math.floor(gameRun.debt * (1 + DEBT_INTEREST_RATE / 100));
+        const newBank = Math.floor(gameRun.bank_balance * (1 + BANK_INTEREST_RATE / 100));
+
+        updateData = {
+          location,
+          days_played: newDay,
+          debt: newDebt,
+          bank_balance: newBank
+        };
+
+        eventDescription = `Traveled to new location. Day ${newDay}/30. Debt: $${newDebt.toLocaleString()}, Bank: $${newBank.toLocaleString()}`;
+        
+        // Check for cop encounter after travel
+        if (checkForCopEncounter(newDay)) {
+          eventDescription += ' ⚠️ Officer Hardass spotted you!';
+        }
+        
         break;
       }
 
+      // ===== END DAY =====
       case 'endDay': {
-        updatedRun.days_played += 1;
-        
-        // Generate random event
-        const event = generateRandomEvent(updatedRun.days_played);
-        updatedRun.cash = Math.max(0, updatedRun.cash + event.cashChange);
-        updatedRun.last_event = event.description;
+        if (gameRun.health <= 0) {
+          return NextResponse.json(
+            { success: false, error: 'Cannot end day - you are dead!' },
+            { status: 400 }
+          );
+        }
 
-        // Log event
+        const newDay = gameRun.days_played + 1;
+        
+        // Calculate interest
+        const newDebt = Math.floor(gameRun.debt * (1 + DEBT_INTEREST_RATE / 100));
+        const newBank = Math.floor(gameRun.bank_balance * (1 + BANK_INTEREST_RATE / 100));
+
+        // Generate event
+        const event = generateRandomEvent(newDay, gameRun.has_gun);
+        const newCash = Math.max(0, gameRun.cash + event.cashChange);
+
+        updateData = {
+          days_played: newDay,
+          cash: newCash,
+          debt: newDebt,
+          bank_balance: newBank
+        };
+
+        eventDescription = `Day ${newDay}/30. ${event.description} Debt: $${newDebt.toLocaleString()}, Bank: $${newBank.toLocaleString()}`;
+
+        // Record event
         await supabase.from('game_events').insert({
-          run_id: runId,
-          day: updatedRun.days_played,
-          event_type: event.cashChange > 0 ? 'gain' : event.cashChange < 0 ? 'loss' : 'neutral',
+          run_id: gameRun.id,
+          day: newDay,
+          event_type: 'daily_event',
           description: event.description,
           cash_change: event.cashChange
         });
 
-        // Check win/loss conditions
-        const netWorth = updatedRun.cash + 
-          (updatedRun.weed * prices.weed) +
-          (updatedRun.acid * prices.acid) +
-          (updatedRun.cocaine * prices.cocaine) +
-          (updatedRun.heroin * prices.heroin);
-
-        if (netWorth >= 1000000) {
-          updatedRun.status = 'finished';
-          updatedRun.did_win = true;
-          updatedRun.final_net_worth = netWorth;
-          updatedRun.last_event = 'You won! Reached $1,000,000!';
-        } else if (updatedRun.days_played >= 30) {
-          updatedRun.status = 'finished';
-          updatedRun.did_win = false;
-          updatedRun.final_net_worth = netWorth;
-          updatedRun.last_event = 'Game over. You ran out of time.';
-        }
         break;
       }
 
+      // ===== HUSTLE =====
       case 'hustle': {
-        if (updatedRun.cash !== 0) {
+        if (gameRun.hustles_used >= 3) {
           return NextResponse.json(
-            { error: 'Cash must be 0 to hustle' },
+            { success: false, error: 'Max hustles used (3 per game)' },
             { status: 400 }
           );
         }
 
-        if ((updatedRun.hustles_used || 0) >= 2) {
-          return NextResponse.json(
-            { error: 'No hustles left' },
-            { status: 400 }
-          );
-        }
-
-        updatedRun.hustles_used = (updatedRun.hustles_used || 0) + 1;
-        const success = Math.random() > 0.5;
-        
-        if (success) {
-          const gain = 100 + Math.floor(Math.random() * 200);
-          updatedRun.cash += gain;
-          updatedRun.last_event = `Street hustle paid off! Gained $${gain}`;
-        } else {
-          updatedRun.last_event = 'You tried hustling, but gained nothing.';
-        }
+        const hustleAmount = Math.floor(Math.random() * 2000) + 500;
+        updateData = {
+          cash: gameRun.cash + hustleAmount,
+          hustles_used: gameRun.hustles_used + 1
+        };
+        eventDescription = `Hustled and earned $${hustleAmount.toLocaleString()}! (${gameRun.hustles_used + 1}/3 used)`;
         break;
       }
 
+      // ===== STASH =====
       case 'stash': {
-        if (updatedRun.cash !== 0) {
+        if (gameRun.stashes_used >= 3) {
           return NextResponse.json(
-            { error: 'Cash must be 0 to use stash' },
+            { success: false, error: 'Max stashes used (3 per game)' },
             { status: 400 }
           );
         }
 
-        if ((updatedRun.stashes_used || 0) >= 1) {
+        const drugToGive = Math.floor(Math.random() * 4);
+        const amountToGive = Math.floor(Math.random() * 15) + 5;
+        
+        // Check capacity
+        const currentInventory = gameRun.weed + gameRun.acid + gameRun.cocaine + gameRun.heroin;
+        if (currentInventory + amountToGive > gameRun.trenchcoat_capacity) {
           return NextResponse.json(
-            { error: 'No stash left' },
+            { success: false, error: 'Not enough space for stash!' },
             { status: 400 }
           );
         }
 
-        updatedRun.stashes_used = (updatedRun.stashes_used || 0) + 1;
-        const gain = 400 + Math.floor(Math.random() * 600);
-        updatedRun.cash += gain;
-        updatedRun.last_event = `You found a stash! Gained $${gain}`;
+        const drugColumn = ['weed', 'acid', 'cocaine', 'heroin'][drugToGive];
+        updateData = {
+          [drugColumn]: gameRun[drugColumn] + amountToGive,
+          stashes_used: gameRun.stashes_used + 1
+        };
+        eventDescription = `Found a stash! +${amountToGive} ${DRUG_NAMES[drugToGive]}! (${gameRun.stashes_used + 1}/3 used)`;
         break;
       }
 
+      // ===== DEPOSIT TO BANK =====
+      case 'depositBank': {
+        const { amount } = body;
+        
+        if (!amount || amount <= 0) {
+          return NextResponse.json(
+            { success: false, error: 'Invalid amount' },
+            { status: 400 }
+          );
+        }
+
+        if (gameRun.cash < amount) {
+          return NextResponse.json(
+            { success: false, error: 'Not enough cash' },
+            { status: 400 }
+          );
+        }
+
+        updateData = {
+          cash: gameRun.cash - amount,
+          bank_balance: gameRun.bank_balance + amount
+        };
+        eventDescription = `Deposited $${amount.toLocaleString()} to bank. Balance: $${(gameRun.bank_balance + amount).toLocaleString()}`;
+        break;
+      }
+
+      // ===== WITHDRAW FROM BANK =====
+      case 'withdrawBank': {
+        const { amount } = body;
+        
+        if (!amount || amount <= 0) {
+          return NextResponse.json(
+            { success: false, error: 'Invalid amount' },
+            { status: 400 }
+          );
+        }
+
+        if (gameRun.bank_balance < amount) {
+          return NextResponse.json(
+            { success: false, error: 'Not enough in bank' },
+            { status: 400 }
+          );
+        }
+
+        updateData = {
+          cash: gameRun.cash + amount,
+          bank_balance: gameRun.bank_balance - amount
+        };
+        eventDescription = `Withdrew $${amount.toLocaleString()} from bank. Balance: $${(gameRun.bank_balance - amount).toLocaleString()}`;
+        break;
+      }
+
+      // ===== PAY LOAN =====
+      case 'payLoan': {
+        const { amount } = body;
+        
+        if (!amount || amount <= 0) {
+          return NextResponse.json(
+            { success: false, error: 'Invalid amount' },
+            { status: 400 }
+          );
+        }
+
+        if (gameRun.cash < amount) {
+          return NextResponse.json(
+            { success: false, error: 'Not enough cash' },
+            { status: 400 }
+          );
+        }
+
+        const actualPayment = Math.min(amount, gameRun.debt);
+        updateData = {
+          cash: gameRun.cash - actualPayment,
+          debt: gameRun.debt - actualPayment
+        };
+        eventDescription = `Paid $${actualPayment.toLocaleString()} to loan shark. Debt: $${(gameRun.debt - actualPayment).toLocaleString()}`;
+        break;
+      }
+
+      // ===== UPGRADE COAT =====
+      case 'upgradeCoat': {
+        if (gameRun.cash < COAT_UPGRADE_COST) {
+          return NextResponse.json(
+            { success: false, error: `Need $${COAT_UPGRADE_COST.toLocaleString()} for upgrade` },
+            { status: 400 }
+          );
+        }
+
+        const newCapacity = gameRun.trenchcoat_capacity + 50;
+        updateData = {
+          cash: gameRun.cash - COAT_UPGRADE_COST,
+          trenchcoat_capacity: newCapacity,
+          coat_upgrades: gameRun.coat_upgrades + 1
+        };
+        eventDescription = `Upgraded trenchcoat! Capacity: ${newCapacity} spaces.`;
+
+        // Record upgrade
+        await supabase.from('upgrades').insert({
+          run_id: gameRun.id,
+          day: gameRun.days_played,
+          upgrade_type: 'coat',
+          cost: COAT_UPGRADE_COST
+        });
+        break;
+      }
+
+      // ===== BUY GUN =====
+      case 'buyGun': {
+        if (gameRun.has_gun) {
+          return NextResponse.json(
+            { success: false, error: 'Already have a gun' },
+            { status: 400 }
+          );
+        }
+
+        if (gameRun.cash < GUN_COST) {
+          return NextResponse.json(
+            { success: false, error: `Need $${GUN_COST.toLocaleString()} for gun` },
+            { status: 400 }
+          );
+        }
+
+        updateData = {
+          cash: gameRun.cash - GUN_COST,
+          has_gun: true
+        };
+        eventDescription = 'Bought a gun! Now you can fight back against cops.';
+
+        // Record upgrade
+        await supabase.from('upgrades').insert({
+          run_id: gameRun.id,
+          day: gameRun.days_played,
+          upgrade_type: 'gun',
+          cost: GUN_COST
+        });
+        break;
+      }
+
+      // ===== FIGHT COP =====
+      case 'fightCop': {
+        if (!gameRun.has_gun) {
+          return NextResponse.json(
+            { success: false, error: 'Need a gun to fight!' },
+            { status: 400 }
+          );
+        }
+
+        // 60% chance to win fight
+        const wonFight = Math.random() < 0.6;
+
+        if (wonFight) {
+          updateData = {
+            cash: gameRun.cash + COP_REWARD
+          };
+          eventDescription = `Fought Officer Hardass and won! +$${COP_REWARD.toLocaleString()}`;
+
+          await supabase.from('combat_events').insert({
+            run_id: gameRun.id,
+            day: gameRun.days_played,
+            event_type: 'fight_won',
+            cash_change: COP_REWARD,
+            health_change: 0,
+            description: eventDescription
+          });
+        } else {
+          const newHealth = Math.max(0, gameRun.health - COP_DAMAGE);
+          updateData = {
+            health: newHealth
+          };
+          eventDescription = `Fought Officer Hardass but got hurt! -${COP_DAMAGE} health`;
+
+          if (newHealth <= 0) {
+            eventDescription += ' 💀 You died!';
+            updateData.status = 'lost';
+          }
+
+          await supabase.from('combat_events').insert({
+            run_id: gameRun.id,
+            day: gameRun.days_played,
+            event_type: 'fight_lost',
+            cash_change: 0,
+            health_change: -COP_DAMAGE,
+            description: eventDescription
+          });
+        }
+        break;
+      }
+
+      // ===== RUN FROM COP =====
+      case 'runFromCop': {
+        // 70% chance to escape
+        const escaped = Math.random() < 0.7;
+
+        if (escaped) {
+          eventDescription = 'Ran away from Officer Hardass! Got away safely.';
+          await supabase.from('combat_events').insert({
+            run_id: gameRun.id,
+            day: gameRun.days_played,
+            event_type: 'ran_away',
+            cash_change: 0,
+            health_change: 0,
+            description: eventDescription
+          });
+        } else {
+          const damage = Math.floor(COP_DAMAGE / 2); // Less damage than fighting
+          const newHealth = Math.max(0, gameRun.health - damage);
+          updateData = {
+            health: newHealth
+          };
+          eventDescription = `Tried to run but got shot! -${damage} health`;
+
+          if (newHealth <= 0) {
+            eventDescription += ' 💀 You died!';
+            updateData.status = 'lost';
+          }
+
+          await supabase.from('combat_events').insert({
+            run_id: gameRun.id,
+            day: gameRun.days_played,
+            event_type: 'run_failed',
+            cash_change: 0,
+            health_change: -damage,
+            description: eventDescription
+          });
+        }
+        break;
+      }
+
+      // ===== CLAIM DAILY ICE =====
       case 'claimDailyIce': {
-        // Get player data to check last claim time
-        const { data: playerData, error: playerError } = await supabase
+        const { data: player } = await supabase
           .from('players')
-          .select('last_ice_claim_at, total_ice')
+          .select('total_ice, last_ice_claim_at')
           .eq('wallet_address', playerAddress)
           .single();
 
-        if (playerError) {
-          console.error('Error fetching player data:', playerError);
+        if (!player) {
           return NextResponse.json(
-            { error: 'Failed to fetch player data' },
-            { status: 500 }
+            { success: false, error: 'Player not found' },
+            { status: 404 }
           );
         }
 
-        // Check if 24 hours have passed since last claim
         const now = new Date();
-        const lastClaim = playerData?.last_ice_claim_at ? new Date(playerData.last_ice_claim_at) : null;
-        
+        const lastClaim = player.last_ice_claim_at ? new Date(player.last_ice_claim_at) : null;
+
         if (lastClaim) {
-          const hoursSinceLastClaim = (now.getTime() - lastClaim.getTime()) / (1000 * 60 * 60);
-          
-          if (hoursSinceLastClaim < 24) {
-            const hoursRemaining = Math.ceil(24 - hoursSinceLastClaim);
+          const timeSince = now.getTime() - lastClaim.getTime();
+          const hoursSince = timeSince / (1000 * 60 * 60);
+
+          if (hoursSince < 24) {
+            const hoursLeft = Math.ceil(24 - hoursSince);
             return NextResponse.json(
-              { 
-                error: `Daily ICE already claimed. Next claim in ${hoursRemaining} hours.`,
-                hoursRemaining 
-              },
+              { success: false, error: `Claim available in ${hoursLeft} hours` },
               { status: 400 }
             );
           }
         }
 
-        // Award daily ICE (1-3 ICE per day)
-        const dailyIceReward = 1 + Math.floor(Math.random() * 3); // Random 1-3 ICE
-        const newTotalIce = (playerData?.total_ice || 0) + dailyIceReward;
+        const iceReward = Math.floor(Math.random() * 3) + 1;
+        const newTotalIce = (player.total_ice || 0) + iceReward;
 
-        // Update player's ICE balance and last claim time
-        const { error: updateError } = await supabase
+        await supabase
           .from('players')
           .update({
             total_ice: newTotalIce,
@@ -337,55 +632,34 @@ export async function POST(request: NextRequest) {
           })
           .eq('wallet_address', playerAddress);
 
-        if (updateError) {
-          console.error('Error updating ICE claim:', updateError);
-          return NextResponse.json(
-            { error: 'Failed to claim ICE' },
-            { status: 500 }
-          );
-        }
-
-        updatedRun.last_event = `Claimed ${dailyIceReward} daily ICE! Total: ${newTotalIce}`;
-        console.log(`✅ Player ${playerAddress} claimed ${dailyIceReward} ICE. New total: ${newTotalIce}`);
+        eventDescription = `Claimed ${iceReward} ICE! Total: ${newTotalIce}`;
         break;
       }
 
       default:
         return NextResponse.json(
-          { error: 'Unknown action' },
+          { success: false, error: 'Unknown action' },
           { status: 400 }
         );
     }
 
-    // Save updated game state
-    const { data: saved, error: saveError } = await supabase
+    // Update game state
+    updateData.last_event_description = eventDescription;
+    updateData.last_event = eventDescription;
+
+    const { error: updateError } = await supabase
       .from('game_runs')
-      .update(updatedRun)
-      .eq('id', runId)
-      .select()
-      .single();
+      .update(updateData)
+      .eq('id', gameRun.id);
 
-    if (saveError) throw saveError;
+    if (updateError) throw updateError;
 
-    // Get updated prices for new location/day
-    const newPrices = await getCurrentPrices(
-      runId,
-      saved.days_played,
-      saved.location
-    );
-
-    return NextResponse.json({
-      success: true,
-      gameRun: {
-        ...saved,
-        prices: newPrices
-      }
-    });
+    return NextResponse.json({ success: true });
 
   } catch (error: any) {
     console.error('Action error:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to execute action' },
+      { success: false, error: error.message || 'Action failed' },
       { status: 500 }
     );
   }
