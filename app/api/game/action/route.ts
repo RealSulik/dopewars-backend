@@ -25,13 +25,13 @@ const CITY_MULTIPLIERS = [
 ];
 
 // Constants
-const DEBT_INTEREST_RATE = 10; // 10% per day
-const BANK_INTEREST_RATE = 2; // 2% per day
+const DEBT_INTEREST_RATE = 10;
+const BANK_INTEREST_RATE = 2;
 const COAT_UPGRADE_COST = 5000;
 const GUN_COST = 3000;
 const COP_REWARD = 2000;
 const COP_DAMAGE = 25;
-const MAX_DAYS = 30; // ENFORCE 30 DAY LIMIT
+const MAX_DAYS = 30;
 
 function generatePrice(drugIndex: number, location: number): number {
   const range = PRICE_RANGES[drugIndex as keyof typeof PRICE_RANGES];
@@ -48,26 +48,23 @@ function generateRandomEvent(day: number, hasGun: boolean): { description: strin
   const roll = Math.random();
   
   if (day < 10) {
-    // Early days: mostly positive events
     if (roll > 0.8) {
       const gain = Math.floor(Math.random() * 1000);
       return { description: `Found $${gain.toLocaleString()} in cash!`, cashChange: gain };
     }
   } else if (day > 20) {
-    // Late game: higher stakes, but REDUCED robbery frequency
     if (roll > 0.85) {
       const gain = Math.floor(Math.random() * 1500);
       return { description: `Big score! Found $${gain.toLocaleString()}!`, cashChange: gain };
-    } else if (roll > 0.7) { // CHANGED FROM 0.5 TO 0.7 = 30% chance instead of 50%
+    } else if (roll > 0.7) {
       const loss = Math.floor(Math.random() * 3000);
       return { description: `Robbed! Lost $${loss.toLocaleString()}`, cashChange: -loss };
     }
   } else {
-    // Mid game
     if (roll > 0.8) {
       const gain = Math.floor(Math.random() * 1000);
       return { description: `Found $${gain.toLocaleString()} stash!`, cashChange: gain };
-    } else if (roll > 0.7) { // CHANGED FROM 0.5 TO 0.7 = 30% chance
+    } else if (roll > 0.7) {
       const loss = Math.floor(Math.random() * 1000);
       return { description: `Crooked cops took $${loss.toLocaleString()}`, cashChange: -loss };
     }
@@ -77,23 +74,17 @@ function generateRandomEvent(day: number, hasGun: boolean): { description: strin
 }
 
 function checkForCopEncounter(day: number): boolean {
-  // 15% chance of cop encounter, increasing with days
   const baseChance = 0.15;
-  const dayMultiplier = Math.min(day / 30, 1); // Max 100% increase
+  const dayMultiplier = Math.min(day / 30, 1);
   const chance = baseChance * (1 + dayMultiplier);
   return Math.random() < chance;
 }
 
-// NEW: Check for RANDOM coat upgrade offer (original Dope Wars mechanic!)
 function checkForCoatUpgradeOffer(day: number, coatUpgrades: number): boolean {
-  // Can only get ONE upgrade total (original game)
   if (coatUpgrades >= 1) return false;
-  
-  // 10% chance during days 5-25
   if (day >= 5 && day <= 25) {
     return Math.random() < 0.10;
   }
-  
   return false;
 }
 
@@ -115,16 +106,12 @@ async function getCurrentPrices(runId: string, day: number, location: number) {
     };
   }
 
-  // Generate new prices if they don't exist
   const prices = {
     weed: generatePrice(0, location),
     acid: generatePrice(1, location),
     cocaine: generatePrice(2, location),
     heroin: generatePrice(3, location)
   };
-
-  // Add small delay before inserting to avoid race conditions
-  await new Promise(resolve => setTimeout(resolve, 100));
 
   await supabase.from('daily_prices').insert({
     run_id: runId,
@@ -151,7 +138,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get active game run
     const { data: gameRun, error: runError } = await supabase
       .from('game_runs')
       .select('*')
@@ -168,7 +154,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ===== ENFORCE DAY 30 LIMIT =====
     if (gameRun.days_played >= MAX_DAYS && action !== 'settle') {
       return NextResponse.json(
         { 
@@ -184,7 +169,6 @@ export async function POST(request: NextRequest) {
     let eventDescription = '';
 
     switch (action) {
-      // ===== BUY DRUG =====
       case 'buy': {
         const { drugIndex, amount } = body;
 
@@ -223,7 +207,6 @@ export async function POST(request: NextRequest) {
         break;
       }
 
-      // ===== SELL DRUG =====
       case 'sell': {
         const { drugIndex, amount } = body;
 
@@ -254,7 +237,6 @@ export async function POST(request: NextRequest) {
         break;
       }
 
-      // ===== TRAVEL (ENDS DAY + RANDOM EVENTS) =====
       case 'travelTo': {
         const { location } = body;
         
@@ -280,8 +262,6 @@ export async function POST(request: NextRequest) {
         }
 
         const newDay = gameRun.days_played + 1;
-        
-        // Calculate interest
         const newDebt = Math.floor(gameRun.debt * (1 + DEBT_INTEREST_RATE / 100));
         const newBank = Math.floor(gameRun.bank_balance * (1 + BANK_INTEREST_RATE / 100));
 
@@ -294,20 +274,17 @@ export async function POST(request: NextRequest) {
 
         eventDescription = `Day ${newDay}/${MAX_DAYS}`;
         
-        // Check for RANDOM events during travel
         let travelEvents: string[] = [];
         
-        // 1. Check for cop encounter
         const copEncounter = checkForCopEncounter(newDay);
         if (copEncounter) {
-          updateData.cop_encounter_pending = true; // FLAG FOR FRONTEND
-          travelEvents.push('⚠️ OFFICER HARDASS SPOTTED YOU!');
+          updateData.cop_encounter_pending = true;
+          travelEvents.push(⚠️ OFFICER HARDASS SPOTTED YOU!');
         }
         
-        // 2. Check for coat upgrade offer (ORIGINAL MECHANIC!)
         const coatOffer = checkForCoatUpgradeOffer(newDay, gameRun.coat_upgrades);
         if (coatOffer) {
-          updateData.coat_offer_pending = true; // FLAG FOR FRONTEND
+          updateData.coat_offer_pending = true;
           travelEvents.push(`🧥 Someone offers to sell you a bigger trenchcoat for $${COAT_UPGRADE_COST.toLocaleString()}!`);
         }
         
@@ -315,10 +292,13 @@ export async function POST(request: NextRequest) {
           eventDescription += ' | ' + travelEvents.join(' | ');
         }
         
+        // ✅ PRICE BUG FIX: Generate prices and wait for DB write
+        await getCurrentPrices(gameRun.id, newDay, location);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
         break;
       }
 
-      // ===== END DAY (NO TRAVEL) =====
       case 'endDay': {
         if (gameRun.health <= 0) {
           return NextResponse.json(
@@ -328,12 +308,9 @@ export async function POST(request: NextRequest) {
         }
 
         const newDay = gameRun.days_played + 1;
-        
-        // Calculate interest
         const newDebt = Math.floor(gameRun.debt * (1 + DEBT_INTEREST_RATE / 100));
         const newBank = Math.floor(gameRun.bank_balance * (1 + BANK_INTEREST_RATE / 100));
 
-        // Generate event
         const event = generateRandomEvent(newDay, gameRun.has_gun);
         const newCash = Math.max(0, gameRun.cash + event.cashChange);
 
@@ -346,7 +323,6 @@ export async function POST(request: NextRequest) {
 
         eventDescription = `Day ${newDay}/${MAX_DAYS}. ${event.description}`;
 
-        // Record event
         await supabase.from('game_events').insert({
           run_id: gameRun.id,
           day: newDay,
@@ -355,10 +331,13 @@ export async function POST(request: NextRequest) {
           cash_change: event.cashChange
         });
 
+        // ✅ PRICE BUG FIX: Generate prices and wait for DB write
+        await getCurrentPrices(gameRun.id, newDay, gameRun.location);
+        await new Promise(resolve => setTimeout(resolve, 100));
+
         break;
       }
 
-      // ===== HUSTLE =====
       case 'hustle': {
         if (gameRun.hustles_used >= 3) {
           return NextResponse.json(
@@ -376,7 +355,6 @@ export async function POST(request: NextRequest) {
         break;
       }
 
-      // ===== STASH =====
       case 'stash': {
         if (gameRun.stashes_used >= 3) {
           return NextResponse.json(
@@ -388,7 +366,6 @@ export async function POST(request: NextRequest) {
         const drugToGive = Math.floor(Math.random() * 4);
         const amountToGive = Math.floor(Math.random() * 15) + 5;
         
-        // Check capacity
         const currentInventory = gameRun.weed + gameRun.acid + gameRun.cocaine + gameRun.heroin;
         if (currentInventory + amountToGive > gameRun.trenchcoat_capacity) {
           return NextResponse.json(
@@ -402,12 +379,10 @@ export async function POST(request: NextRequest) {
           [drugColumn]: gameRun[drugColumn] + amountToGive,
           stashes_used: gameRun.stashes_used + 1
         };
-        // FIXED: Better description showing what was found
         eventDescription = `Found a stash with ${amountToGive} ${DRUG_NAMES[drugToGive]}! (${gameRun.stashes_used + 1}/3 used)`;
         break;
       }
 
-      // ===== DEPOSIT TO BANK =====
       case 'depositBank': {
         const { amount } = body;
         
@@ -433,7 +408,6 @@ export async function POST(request: NextRequest) {
         break;
       }
 
-      // ===== WITHDRAW FROM BANK =====
       case 'withdrawBank': {
         const { amount } = body;
         
@@ -459,7 +433,6 @@ export async function POST(request: NextRequest) {
         break;
       }
 
-      // ===== PAY LOAN =====
       case 'payLoan': {
         const { amount } = body;
         
@@ -486,7 +459,6 @@ export async function POST(request: NextRequest) {
         break;
       }
 
-      // ===== ACCEPT COAT OFFER (NEW!) =====
       case 'acceptCoatOffer': {
         if (!gameRun.coat_offer_pending) {
           return NextResponse.json(
@@ -510,18 +482,9 @@ export async function POST(request: NextRequest) {
           coat_offer_pending: false
         };
         eventDescription = `🎉 Upgraded trenchcoat! Capacity: ${newCapacity} spaces.`;
-
-        // Record upgrade
-        await supabase.from('upgrades').insert({
-          run_id: gameRun.id,
-          day: gameRun.days_played,
-          upgrade_type: 'coat',
-          cost: COAT_UPGRADE_COST
-        });
         break;
       }
 
-      // ===== DECLINE COAT OFFER (NEW!) =====
       case 'declineCoatOffer': {
         updateData = {
           coat_offer_pending: false
@@ -530,8 +493,6 @@ export async function POST(request: NextRequest) {
         break;
       }
 
-      // ===== BUY GUN (Removed - guns are now random offers in original game) =====
-      // Keeping for backward compatibility but should be converted to random offer
       case 'buyGun': {
         if (gameRun.has_gun) {
           return NextResponse.json(
@@ -552,18 +513,9 @@ export async function POST(request: NextRequest) {
           has_gun: true
         };
         eventDescription = 'Bought a gun! Now you can fight back against cops.';
-
-        // Record upgrade
-        await supabase.from('upgrades').insert({
-          run_id: gameRun.id,
-          day: gameRun.days_played,
-          upgrade_type: 'gun',
-          cost: GUN_COST
-        });
         break;
       }
 
-      // ===== FIGHT COP =====
       case 'fightCop': {
         if (!gameRun.cop_encounter_pending) {
           return NextResponse.json(
@@ -572,7 +524,6 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        // Better odds with gun
         const fightChance = gameRun.has_gun ? 0.6 : 0.3;
         const wonFight = Math.random() < fightChance;
 
@@ -583,15 +534,6 @@ export async function POST(request: NextRequest) {
         if (wonFight) {
           updateData.cash = gameRun.cash + COP_REWARD;
           eventDescription = `💪 Fought Officer Hardass and won! +$${COP_REWARD.toLocaleString()}`;
-
-          await supabase.from('combat_events').insert({
-            run_id: gameRun.id,
-            day: gameRun.days_played,
-            event_type: 'fight_won',
-            cash_change: COP_REWARD,
-            health_change: 0,
-            description: eventDescription
-          });
         } else {
           const newHealth = Math.max(0, gameRun.health - COP_DAMAGE);
           updateData.health = newHealth;
@@ -601,20 +543,10 @@ export async function POST(request: NextRequest) {
             eventDescription += ' 💀 You died!';
             updateData.status = 'lost';
           }
-
-          await supabase.from('combat_events').insert({
-            run_id: gameRun.id,
-            day: gameRun.days_played,
-            event_type: 'fight_lost',
-            cash_change: 0,
-            health_change: -COP_DAMAGE,
-            description: eventDescription
-          });
         }
         break;
       }
 
-      // ===== RUN FROM COP =====
       case 'runFromCop': {
         if (!gameRun.cop_encounter_pending) {
           return NextResponse.json(
@@ -623,7 +555,6 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        // 70% chance to escape
         const escaped = Math.random() < 0.7;
 
         updateData = {
@@ -632,16 +563,8 @@ export async function POST(request: NextRequest) {
 
         if (escaped) {
           eventDescription = '🏃 Ran away from Officer Hardass! Got away safely.';
-          await supabase.from('combat_events').insert({
-            run_id: gameRun.id,
-            day: gameRun.days_played,
-            event_type: 'ran_away',
-            cash_change: 0,
-            health_change: 0,
-            description: eventDescription
-          });
         } else {
-          const damage = Math.floor(COP_DAMAGE / 2); // Less damage than fighting
+          const damage = Math.floor(COP_DAMAGE / 2);
           const newHealth = Math.max(0, gameRun.health - damage);
           updateData.health = newHealth;
           eventDescription = `😰 Tried to run but got shot! -${damage} health`;
@@ -650,20 +573,10 @@ export async function POST(request: NextRequest) {
             eventDescription += ' 💀 You died!';
             updateData.status = 'lost';
           }
-
-          await supabase.from('combat_events').insert({
-            run_id: gameRun.id,
-            day: gameRun.days_played,
-            event_type: 'run_failed',
-            cash_change: 0,
-            health_change: -damage,
-            description: eventDescription
-          });
         }
         break;
       }
 
-      // ===== CLAIM DAILY ICE =====
       case 'claimDailyIce': {
         const { data: player } = await supabase
           .from('players')
@@ -716,13 +629,10 @@ export async function POST(request: NextRequest) {
         );
     }
 
-    // Update game state
     updateData.last_event_description = eventDescription;
     updateData.last_event = eventDescription;
 
-    // ===== CHECK WIN CONDITION (Track when player first hits $1M) =====
     if (!gameRun.won_at_day) {
-      // Calculate current net worth
       const currentPrices = await getCurrentPrices(gameRun.id, gameRun.days_played, gameRun.location);
       const priceArray = [currentPrices.weed, currentPrices.acid, currentPrices.cocaine, currentPrices.heroin];
       
@@ -739,7 +649,6 @@ export async function POST(request: NextRequest) {
         drugValue
       );
       
-      // If hit $1M for first time, record it!
       if (currentNetWorth >= 1_000_000) {
         updateData.won_at_day = gameRun.days_played;
         console.log(`🎉 Player won at day ${gameRun.days_played}! Net worth: $${currentNetWorth.toLocaleString()}`);
