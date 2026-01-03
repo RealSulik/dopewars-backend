@@ -9,35 +9,6 @@ const supabase = createClient(
 
 // Contract details
 const CONTRACT_ADDRESS = '0x58b200A5ac031DD6245ffc63E0A247AEe39ec609';
-const CONTRACT_ABI = [
-  {
-    "inputs": [
-      {"internalType": "address", "name": "playerAddress", "type": "address"},
-      {"internalType": "uint256", "name": "finalNetWorth", "type": "uint256"},
-      {"internalType": "uint256", "name": "daysPlayed", "type": "uint256"},
-      {"internalType": "bytes32", "name": "runId", "type": "bytes32"},
-      {"internalType": "bytes", "name": "signature", "type": "bytes"}
-    ],
-    "name": "settleRun",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {"internalType": "address", "name": "player", "type": "address"}
-    ],
-    "name": "getPlayerStats",
-    "outputs": [
-      {"internalType": "uint256", "name": "ice", "type": "uint256"},
-      {"internalType": "uint256", "name": "bestScore", "type": "uint256"},
-      {"internalType": "uint256", "name": "runs", "type": "uint256"},
-      {"internalType": "uint256", "name": "wins", "type": "uint256"}
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  }
-];
 
 export async function POST(request: NextRequest) {
   try {
@@ -123,18 +94,17 @@ export async function POST(request: NextRequest) {
 
     console.log('🆔 Run ID:', runId);
 
-    // Get server wallet
+    // Get server wallet for SIGNING ONLY
     const serverPrivateKey = process.env.SERVER_PRIVATE_KEY;
     if (!serverPrivateKey) {
       throw new Error('Server private key not configured');
     }
 
-    const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL);
-    const serverWallet = new ethers.Wallet(serverPrivateKey, provider);
+    const serverWallet = new ethers.Wallet(serverPrivateKey);
 
-    console.log('🔑 Server wallet:', serverWallet.address);
+    console.log('🔐 Server wallet (for signing):', serverWallet.address);
 
-    // Sign with PLAYER ADDRESS
+    // Create the message hash (matches contract logic)
     const messageHash = ethers.keccak256(
       ethers.solidityPacked(
         ['address', 'uint256', 'uint256', 'bytes32'],
@@ -142,98 +112,66 @@ export async function POST(request: NextRequest) {
       )
     );
 
-    const ethSignedMessageHash = ethers.keccak256(
-      ethers.solidityPacked(
-        ['string', 'bytes32'],
-        ['\x19Ethereum Signed Message:\n32', messageHash]
-      )
-    );
-
+    // Sign the message hash
     const signature = await serverWallet.signMessage(ethers.getBytes(messageHash));
 
-    console.log('✍️ Signature created:', signature);
+    console.log('✏️ Signature created:', signature);
 
-    // Call smart contract
-    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, serverWallet);
+    // Calculate ICE reward
+    const didWin = gameRun.won_at_day !== null;
+    const iceAwarded = didWin ? 10 : calculateIceReward(finalNetWorth, gameRun.days_played);
 
-    console.log('📞 Calling settleRun with:', {
-      playerAddress,
-      finalNetWorth,
-      daysPlayed: gameRun.days_played,
-      runId,
-      signatureLength: signature.length
-    });
-
-    const tx = await contract.settleRun(
-      playerAddress,
-      finalNetWorth,
-      gameRun.days_played,
-      runId,
-      signature
-    );
-
-    console.log('⏳ Transaction sent:', tx.hash);
-
-    const receipt = await tx.wait();
-    console.log('✅ Transaction confirmed:', receipt.hash);
-
-    // ===== READ ICE FROM BLOCKCHAIN (NOT DATABASE!) =====
-    console.log('🔍 Reading player stats from blockchain...');
-    const playerStats = await contract.getPlayerStats(playerAddress);
-    const blockchainIce = Number(playerStats[0]); // ice
-    const blockchainBestScore = Number(playerStats[1]); // bestScore
-    const blockchainRuns = Number(playerStats[2]); // runs
-    const blockchainWins = Number(playerStats[3]); // wins
-
-    console.log('📊 Blockchain stats:', {
-      ice: blockchainIce,
-      bestScore: blockchainBestScore,
-      runs: blockchainRuns,
-      wins: blockchainWins
-    });
-
-    // Mark game as settled in database
-    const didWin = gameRun.won_at_day !== null; // Check if they ever hit $1M
-    
+    // Mark game as pending settlement (will be finalized when tx confirms)
     await supabase
       .from('game_runs')
       .update({
-        settled: true,
-        status: didWin ? 'won' : 'lost',
+        status: 'pending_settlement',
         final_net_worth: finalNetWorth,
-        blockchain_tx: receipt.hash,
-        ice_awarded: didWin ? 10 : calculateIceReward(finalNetWorth, gameRun.days_played)
       })
       .eq('id', gameRun.id);
 
-    // ===== UPDATE LEADERBOARD WITH BLOCKCHAIN ICE =====
-    await supabase
-      .from('leaderboard')
-      .upsert({
-        wallet_address: playerAddress,
-        best_net_worth: blockchainBestScore, // Use blockchain's best score
-        total_runs: blockchainRuns, // Use blockchain runs
-        total_wins: blockchainWins, // Use blockchain wins
-        total_ice: blockchainIce // ✅ USE BLOCKCHAIN ICE!
-      }, {
-        onConflict: 'wallet_address',
-        ignoreDuplicates: false
-      });
+    console.log('✅ Settlement signature prepared, returning to frontend');
 
-    console.log('✅ Settlement complete! Leaderboard updated with blockchain ICE:', blockchainIce);
+    // Read current ICE from blockchain for display
+    let totalIce = 0;
+    try {
+      const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://mainnet.base.org');
+      const contractABI = [
+        {
+          "inputs": [{"internalType": "address", "name": "player", "type": "address"}],
+          "name": "getPlayerStats",
+          "outputs": [
+            {"internalType": "uint256", "name": "ice", "type": "uint256"},
+            {"internalType": "uint256", "name": "bestScore", "type": "uint256"},
+            {"internalType": "uint256", "name": "runs", "type": "uint256"},
+            {"internalType": "uint256", "name": "wins", "type": "uint256"}
+          ],
+          "stateMutability": "view",
+          "type": "function"
+        }
+      ];
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, contractABI, provider);
+      const playerStats = await contract.getPlayerStats(playerAddress);
+      totalIce = Number(playerStats[0]);
+      console.log('📊 Current blockchain ICE:', totalIce);
+    } catch (err) {
+      console.warn('Could not read blockchain ICE, using 0:', err);
+    }
 
+    // Return signature for frontend to use
     return NextResponse.json({
       success: true,
-      txHash: receipt.hash,
+      signature,              // Frontend uses this to call contract
       finalNetWorth,
       daysPlayed: gameRun.days_played,
+      runId,                  // Frontend sends this in transaction
       wonAtDay: gameRun.won_at_day,
-      iceAwarded: didWin ? 10 : calculateIceReward(finalNetWorth, gameRun.days_played),
-      totalIce: blockchainIce, // Return total ICE from blockchain
+      iceAwarded,
+      totalIce: totalIce + iceAwarded, // Estimated total after this settlement
       didWin,
       message: didWin
-        ? `🎉 YOU WON at Day ${gameRun.won_at_day}! Earned 10 ICE!` 
-        : 'Game settled. Try again for the $1M goal!'
+        ? `🎉 YOU WON at Day ${gameRun.won_at_day}! Will earn 10 ICE!` 
+        : 'Settlement ready. Confirm transaction in your wallet.'
     });
 
   } catch (error: any) {
@@ -251,4 +189,102 @@ function calculateIceReward(netWorth: number, days: number): number {
   if (netWorth >= 500_000) return 5; // Good run
   if (netWorth >= 250_000) return 2; // Decent run
   return 1; // Participation
+}
+
+// Optional: Webhook to finalize settlement after tx confirms
+// You can call this from frontend after tx.wait() or use Coinbase webhooks
+export async function PATCH(request: NextRequest) {
+  try {
+    const { runId, txHash, playerAddress } = await request.json();
+
+    console.log('🔄 Finalizing settlement:', { runId, txHash, playerAddress });
+
+    // Get the game run
+    const { data: gameRun, error: fetchError } = await supabase
+      .from('game_runs')
+      .select('*')
+      .eq('id', runId)
+      .single();
+
+    if (fetchError || !gameRun) {
+      return NextResponse.json(
+        { success: false, error: 'Game run not found' },
+        { status: 404 }
+      );
+    }
+
+    // Read stats from blockchain
+    const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://mainnet.base.org');
+    const contractABI = [
+      {
+        "inputs": [{"internalType": "address", "name": "player", "type": "address"}],
+        "name": "getPlayerStats",
+        "outputs": [
+          {"internalType": "uint256", "name": "ice", "type": "uint256"},
+          {"internalType": "uint256", "name": "bestScore", "type": "uint256"},
+          {"internalType": "uint256", "name": "runs", "type": "uint256"},
+          {"internalType": "uint256", "name": "wins", "type": "uint256"}
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      }
+    ];
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, contractABI, provider);
+
+    console.log('📊 Reading player stats from blockchain...');
+    const playerStats = await contract.getPlayerStats(playerAddress);
+    const blockchainIce = Number(playerStats[0]);
+    const blockchainBestScore = Number(playerStats[1]);
+    const blockchainRuns = Number(playerStats[2]);
+    const blockchainWins = Number(playerStats[3]);
+
+    console.log('📊 Blockchain stats:', {
+      ice: blockchainIce,
+      bestScore: blockchainBestScore,
+      runs: blockchainRuns,
+      wins: blockchainWins
+    });
+
+    // Mark game as settled
+    const didWin = gameRun.won_at_day !== null;
+    
+    await supabase
+      .from('game_runs')
+      .update({
+        settled: true,
+        status: didWin ? 'won' : 'lost',
+        blockchain_tx: txHash,
+        ice_awarded: didWin ? 10 : calculateIceReward(gameRun.final_net_worth, gameRun.days_played)
+      })
+      .eq('id', runId);
+
+    // Update leaderboard with blockchain data
+    await supabase
+      .from('leaderboard')
+      .upsert({
+        wallet_address: playerAddress,
+        best_net_worth: blockchainBestScore,
+        total_runs: blockchainRuns,
+        total_wins: blockchainWins,
+        total_ice: blockchainIce
+      }, {
+        onConflict: 'wallet_address',
+        ignoreDuplicates: false
+      });
+
+    console.log('✅ Settlement finalized! Leaderboard updated with blockchain ICE:', blockchainIce);
+
+    return NextResponse.json({
+      success: true,
+      totalIce: blockchainIce,
+      message: 'Settlement finalized successfully'
+    });
+
+  } catch (error: any) {
+    console.error('❌ Settlement finalization error:', error);
+    return NextResponse.json(
+      { success: false, error: error.message || 'Failed to finalize settlement' },
+      { status: 500 }
+    );
+  }
 }
