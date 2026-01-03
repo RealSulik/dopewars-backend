@@ -279,7 +279,7 @@ export async function POST(request: NextRequest) {
         const copEncounter = checkForCopEncounter(newDay);
         if (copEncounter) {
           updateData.cop_encounter_pending = true;
-          travelEvents.push(⚠️ OFFICER HARDASS SPOTTED YOU!');
+travelEvents.push(⚠️ OFFICER HARDASS SPOTTED YOU!');
         }
         
         const coatOffer = checkForCoatUpgradeOffer(newDay, gameRun.coat_upgrades);
