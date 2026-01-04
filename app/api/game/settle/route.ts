@@ -191,27 +191,34 @@ function calculateIceReward(netWorth: number, days: number): number {
   return 1; // Participation
 }
 
-// Optional: Webhook to finalize settlement after tx confirms
-// You can call this from frontend after tx.wait() or use Coinbase webhooks
+// ===== FIXED PATCH ENDPOINT =====
+// Webhook to finalize settlement after tx confirms
 export async function PATCH(request: NextRequest) {
   try {
     const { runId, txHash, playerAddress } = await request.json();
 
     console.log('🔄 Finalizing settlement:', { runId, txHash, playerAddress });
 
-    // Get the game run
+    // ✅ FIX: Look up by wallet address instead of runId
+    // The runId from frontend is the blockchain hash, not the database ID
     const { data: gameRun, error: fetchError } = await supabase
       .from('game_runs')
       .select('*')
-      .eq('id', runId)
+      .eq('wallet_address', playerAddress)
+      .eq('status', 'pending_settlement')
+      .order('created_at', { ascending: false })
+      .limit(1)
       .single();
 
     if (fetchError || !gameRun) {
+      console.error('❌ Game run not found for settlement:', fetchError);
       return NextResponse.json(
-        { success: false, error: 'Game run not found' },
+        { success: false, error: 'Game run not found or already finalized' },
         { status: 404 }
       );
     }
+
+    console.log('✅ Found game run to finalize:', gameRun.id);
 
     // Read stats from blockchain
     const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://mainnet.base.org');
@@ -256,10 +263,10 @@ export async function PATCH(request: NextRequest) {
         blockchain_tx: txHash,
         ice_awarded: didWin ? 10 : calculateIceReward(gameRun.final_net_worth, gameRun.days_played)
       })
-      .eq('id', runId);
+      .eq('id', gameRun.id);
 
-    // Update leaderboard with blockchain data
-    await supabase
+    // ✅ FIX: Update leaderboard with blockchain data
+    const { error: leaderboardError } = await supabase
       .from('leaderboard')
       .upsert({
         wallet_address: playerAddress,
@@ -271,6 +278,12 @@ export async function PATCH(request: NextRequest) {
         onConflict: 'wallet_address',
         ignoreDuplicates: false
       });
+
+    if (leaderboardError) {
+      console.error('❌ Leaderboard update failed:', leaderboardError);
+    } else {
+      console.log('✅ Leaderboard updated successfully!');
+    }
 
     console.log('✅ Settlement finalized! Leaderboard updated with blockchain ICE:', blockchainIce);
 
