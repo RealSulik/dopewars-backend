@@ -1,3 +1,4 @@
+// src/app/api/game/start/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
@@ -25,28 +26,39 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check for existing active run
-    const { data: existingRun } = await supabase
+    // === UPDATED: Check for active OR pending_settlement runs ===
+    const { data: existingRun, error: fetchError } = await supabase
       .from('game_runs')
-      .select('id, created_at')
+      .select('id, created_at, status')
       .eq('wallet_address', playerAddress)
-      .eq('status', 'active')
-      .single();
+      .in('status', ['active', 'pending_settlement'])
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(); // Use maybeSingle to avoid error if none found
+
+    if (fetchError && fetchError.code !== 'PGRST116') { // PGRST116 = no rows
+      throw fetchError;
+    }
 
     if (existingRun) {
-      // Check if the active game is old (more than 24 hours)
       const gameAge = Date.now() - new Date(existingRun.created_at).getTime();
       const hours24 = 24 * 60 * 60 * 1000;
-      
-      if (gameAge > hours24) {
-        // Auto-settle old game
-        console.log('⏰ Auto-settling old game (>24h)');
+
+      // Auto-clean old active games OR any pending_settlement (treat as stuck)
+      if (existingRun.status === 'active' && gameAge > hours24) {
+        console.log('⏰ Auto-abandoning old active game (>24h)');
+        await supabase
+          .from('game_runs')
+          .update({ status: 'abandoned' })
+          .eq('id', existingRun.id);
+      } else if (existingRun.status === 'pending_settlement') {
+        console.log('⏰ Auto-abandoning stuck pending_settlement run');
         await supabase
           .from('game_runs')
           .update({ status: 'abandoned' })
           .eq('id', existingRun.id);
       } else {
-        // Game is recent, tell them to settle
+        // Recent active game — block new session
         console.log('⚠️ Player has recent active game');
         return NextResponse.json(
           { success: false, error: 'You already have an active game. Settle it first!' },
@@ -108,7 +120,6 @@ export async function POST(request: NextRequest) {
         stashes_used: 0,
         status: 'active',
         last_event_description: 'Game started! You have $2,000 cash and owe $5,500 to the loan shark. Good luck!',
-        // New V2 fields
         cop_encounter_pending: false,
         coat_offer_pending: false,
         won_at_day: null
