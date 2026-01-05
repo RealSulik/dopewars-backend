@@ -121,16 +121,17 @@ export async function POST(request: NextRequest) {
     const didWin = gameRun.won_at_day !== null;
     const iceAwarded = didWin ? 10 : calculateIceReward(finalNetWorth, gameRun.days_played);
 
-    // Mark game as pending settlement (will be finalized when tx confirms)
+    // ✅ CHANGED: Don't change status here - keep it as 'active'
+    // Only store the final_net_worth for reference
     await supabase
       .from('game_runs')
       .update({
-        status: 'pending_settlement',
         final_net_worth: finalNetWorth,
+        // status stays 'active' - will change to 'settled' in PATCH after tx confirms
       })
       .eq('id', gameRun.id);
 
-    console.log('✅ Settlement signature prepared, returning to frontend');
+    console.log('✅ Settlement signature prepared, game still active (can retry if tx fails)');
 
     // Read current ICE from blockchain for display
     let totalIce = 0;
@@ -165,6 +166,7 @@ export async function POST(request: NextRequest) {
       finalNetWorth,
       daysPlayed: gameRun.days_played,
       runId,                  // Frontend sends this in transaction
+      gameRunId: gameRun.id,  // ✅ NEW: Send database ID for PATCH to use
       wonAtDay: gameRun.won_at_day,
       iceAwarded,
       totalIce: totalIce + iceAwarded, // Estimated total after this settlement
@@ -191,34 +193,38 @@ function calculateIceReward(netWorth: number, days: number): number {
   return 1; // Participation
 }
 
-// ===== FIXED PATCH ENDPOINT =====
-// Webhook to finalize settlement after tx confirms
+// ✅ CHANGED: PATCH now looks up by database ID and changes status from 'active' to 'settled'
 export async function PATCH(request: NextRequest) {
   try {
-    const { runId, txHash, playerAddress } = await request.json();
+    const { gameRunId, txHash, playerAddress } = await request.json();
 
-    console.log('🔄 Finalizing settlement:', { runId, txHash, playerAddress });
+    console.log('🔄 Finalizing settlement:', { gameRunId, txHash, playerAddress });
 
-    // ✅ FIX: Look up by wallet address instead of runId
-    // The runId from frontend is the blockchain hash, not the database ID
+    // Get the game run by database ID
     const { data: gameRun, error: fetchError } = await supabase
       .from('game_runs')
       .select('*')
-      .eq('wallet_address', playerAddress)
-      .eq('status', 'pending_settlement')
-      .order('created_at', { ascending: false })
-      .limit(1)
+      .eq('id', gameRunId)
       .single();
 
     if (fetchError || !gameRun) {
       console.error('❌ Game run not found for settlement:', fetchError);
       return NextResponse.json(
-        { success: false, error: 'Game run not found or already finalized' },
+        { success: false, error: 'Game run not found' },
         { status: 404 }
       );
     }
 
-    console.log('✅ Found game run to finalize:', gameRun.id);
+    // ✅ CHANGED: Verify game is still active (not already settled)
+    if (gameRun.status !== 'active') {
+      console.log('⚠️ Game already settled or in invalid state:', gameRun.status);
+      return NextResponse.json(
+        { success: false, error: 'Game already settled' },
+        { status: 400 }
+      );
+    }
+
+    console.log('✅ Found active game run to finalize:', gameRun.id);
 
     // Read stats from blockchain
     const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://mainnet.base.org');
@@ -255,17 +261,18 @@ export async function PATCH(request: NextRequest) {
     // Mark game as settled
     const didWin = gameRun.won_at_day !== null;
     
+    // ✅ CHANGED: Now we change status from 'active' to 'settled'
     await supabase
       .from('game_runs')
       .update({
         settled: true,
-        status: didWin ? 'won' : 'lost',
+        status: 'settled',  // ✅ Changed from 'active' to 'settled' only after tx confirms
         blockchain_tx: txHash,
         ice_awarded: didWin ? 10 : calculateIceReward(gameRun.final_net_worth, gameRun.days_played)
       })
       .eq('id', gameRun.id);
 
-    // ✅ FIX: Update leaderboard with blockchain data
+    // Update leaderboard with blockchain data
     const { error: leaderboardError } = await supabase
       .from('leaderboard')
       .upsert({
@@ -285,7 +292,7 @@ export async function PATCH(request: NextRequest) {
       console.log('✅ Leaderboard updated successfully!');
     }
 
-    console.log('✅ Settlement finalized! Leaderboard updated with blockchain ICE:', blockchainIce);
+    console.log('✅ Settlement finalized! Status changed to settled. Leaderboard updated with blockchain ICE:', blockchainIce);
 
     return NextResponse.json({
       success: true,
