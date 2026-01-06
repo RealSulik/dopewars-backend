@@ -662,13 +662,7 @@ travelEvents.push(`⚠️ OFFICER HARDASS SPOTTED YOU!`);
 
    if (updateError) throw updateError;
 
-    // ✅ FIX: Return newState so frontend sees the death immediately
-    return NextResponse.json({ 
-      success: true,
-      newState: updateData,
-      event: eventDescription
-    });
-
+    return NextResponse.json({ success: true }); 
   } catch (error: any) {
     console.error('Action error:', error);
     return NextResponse.json(
