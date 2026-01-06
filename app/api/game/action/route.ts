@@ -660,9 +660,14 @@ travelEvents.push(`⚠️ OFFICER HARDASS SPOTTED YOU!`);
       .update(updateData)
       .eq('id', gameRun.id);
 
-    if (updateError) throw updateError;
+   if (updateError) throw updateError;
 
-    return NextResponse.json({ success: true });
+    // ✅ FIX: Return newState so frontend sees the death immediately
+    return NextResponse.json({ 
+      success: true,
+      newState: updateData,
+      event: eventDescription
+    });
 
   } catch (error: any) {
     console.error('Action error:', error);
