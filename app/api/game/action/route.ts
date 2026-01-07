@@ -541,7 +541,7 @@ travelEvents.push(`⚠️ OFFICER HARDASS SPOTTED YOU!`);
 
           if (newHealth <= 0) {
             eventDescription += ' 💀 You died!';
-            updateData.status = 'lost';
+            // Don't set status='lost' yet - frontend will show death modal first, then settle
           }
         }
         break;
@@ -571,7 +571,7 @@ travelEvents.push(`⚠️ OFFICER HARDASS SPOTTED YOU!`);
 
           if (newHealth <= 0) {
             eventDescription += ' 💀 You died!';
-            updateData.status = 'lost';
+            // Don't set status='lost' yet - frontend will show death modal first, then settle
           }
         }
         break;
@@ -662,7 +662,7 @@ travelEvents.push(`⚠️ OFFICER HARDASS SPOTTED YOU!`);
 
    if (updateError) throw updateError;
 
-    return NextResponse.json({ success: true }); 
+    return NextResponse.json({ success: true, eventDescription });
   } catch (error: any) {
     console.error('Action error:', error);
     return NextResponse.json(
