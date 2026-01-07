@@ -88,6 +88,50 @@ function checkForCoatUpgradeOffer(day: number, coatUpgrades: number): boolean {
   return false;
 }
 
+function buildGameState(gameRun: any, prices: number[], totalIce: number) {
+  const netWorth = calculateNetWorth(gameRun, prices);
+
+  return {
+    cash: gameRun.cash,
+    location: gameRun.location,
+    daysPlayed: gameRun.days_played,
+    debt: gameRun.debt,
+    bankBalance: gameRun.bank_balance,
+    trenchcoatCapacity: gameRun.trenchcoat_capacity,
+    inventory: [
+      gameRun.weed,
+      gameRun.acid,
+      gameRun.cocaine,
+      gameRun.heroin
+    ],
+    totalDrugs: gameRun.weed + gameRun.acid + gameRun.cocaine + gameRun.heroin,
+    health: gameRun.health,
+    hasGun: gameRun.has_gun,
+    coatUpgrades: gameRun.coat_upgrades,
+    copEncounterPending: gameRun.cop_encounter_pending || false,
+    coatOfferPending: gameRun.coat_offer_pending || false,
+    wonAtDay: gameRun.won_at_day || null,
+    prices,
+    hustlesUsed: gameRun.hustles_used,
+    stashesUsed: gameRun.stashes_used,
+    lastEventDescription: gameRun.last_event_description,
+    status: gameRun.status,
+    hasFinished: gameRun.status !== 'active',
+    totalIce,
+    netWorthGoal: 1_000_000,
+    currentNetWorth: netWorth
+  };
+}
+
+function calculateNetWorth(gameRun: any, prices: number[]): number {
+  let netWorth = gameRun.cash + gameRun.bank_balance - gameRun.debt;
+  netWorth += gameRun.weed * prices[0];
+  netWorth += gameRun.acid * prices[1];
+  netWorth += gameRun.cocaine * prices[2];
+  netWorth += gameRun.heroin * prices[3];
+  return Math.max(0, netWorth);
+}
+
 async function getCurrentPrices(runId: string, day: number, location: number) {
   const { data } = await supabase
     .from('daily_prices')
@@ -662,7 +706,38 @@ travelEvents.push(`⚠️ OFFICER HARDASS SPOTTED YOU!`);
 
    if (updateError) throw updateError;
 
-    return NextResponse.json({ success: true, eventDescription });
+    // Fetch fresh game state to return with response
+    const { data: freshGameRun } = await supabase
+      .from('game_runs')
+      .select('*')
+      .eq('id', gameRun.id)
+      .single();
+
+    if (!freshGameRun) {
+      return NextResponse.json({ success: true, eventDescription });
+    }
+
+    // Get current prices for the (possibly new) location and day
+    const freshPrices = await getCurrentPrices(
+      freshGameRun.id,
+      freshGameRun.days_played,
+      freshGameRun.location
+    );
+    const pricesArray = [freshPrices.weed, freshPrices.acid, freshPrices.cocaine, freshPrices.heroin];
+
+    // Get player's total ICE
+    const { data: playerIceData } = await supabase
+      .from('players')
+      .select('total_ice')
+      .eq('wallet_address', playerAddress)
+      .single();
+
+    const totalIce = playerIceData?.total_ice || 0;
+
+    // Build and return full game state
+    const gameState = buildGameState(freshGameRun, pricesArray, totalIce);
+
+    return NextResponse.json({ success: true, eventDescription, gameState });
   } catch (error: any) {
     console.error('Action error:', error);
     return NextResponse.json(
